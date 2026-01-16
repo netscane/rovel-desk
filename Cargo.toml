@@ -1,0 +1,29 @@
+[package]
+name = "rovel-desk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.15", features = ["wayland"] }
+bevy_egui = "0.32"
+egui = "0.30"
+reqwest = { version = "0.12", features = ["json", "blocking", "multipart"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1.0", features = ["serde", "v4"] }
+tokio = { version = "1.0", features = ["full"] }
+rodio = "0.20"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+futures-lite = "2.0"
+rfd = "0.15"
+# V2: WebSocket support
+tungstenite = "0.24"
+url = "2.5"
+tracing = "0.1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
