@@ -6,10 +6,12 @@
 //! - 新增 SubmitInfer 推理任务提交
 //! - 新增 WebSocket 事件处理
 //! - 播放完成后自动提交下一批任务
+//!
+//! Note: On Windows, blocking HTTP requests must run in std::thread (not AsyncComputeTaskPool)
+//! to avoid issues with reqwest blocking client.
 
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task};
-use futures_lite::future;
+use std::sync::{mpsc, Mutex};
 
 use crate::api::ApiClient;
 use crate::state::{
@@ -17,9 +19,27 @@ use crate::state::{
     PlayAudioEvent, PlaybackState, WsResponse,
 };
 
-/// API 任务组件
-#[derive(Component)]
-pub struct ApiTask(Task<ApiResponse>);
+/// Channel for API responses from worker threads
+#[derive(Resource)]
+pub struct ApiResponseChannel {
+    receiver: Mutex<mpsc::Receiver<ApiResponse>>,
+    sender: mpsc::Sender<ApiResponse>,
+}
+
+impl Default for ApiResponseChannel {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self {
+            sender,
+            receiver: Mutex::new(receiver),
+        }
+    }
+}
+
+/// Setup API response channel
+pub fn setup_api_channel(mut commands: Commands) {
+    commands.insert_resource(ApiResponseChannel::default());
+}
 
 /// 启动时加载数据
 pub fn startup_load(mut api_events: EventWriter<ApiRequest>) {
@@ -27,14 +47,14 @@ pub fn startup_load(mut api_events: EventWriter<ApiRequest>) {
     api_events.send(ApiRequest::LoadVoices);
 }
 
-/// 处理 API 请求 - 使用 blocking client 在线程池中执行
+/// 处理 API 请求 - 使用 std::thread 执行阻塞请求（Windows 兼容）
 pub fn handle_api_requests(
-    mut commands: Commands,
     mut events: EventReader<ApiRequest>,
     api_client: Res<ApiClient>,
     mut app_state: ResMut<AppState>,
+    channel: Option<Res<ApiResponseChannel>>,
 ) {
-    let pool = AsyncComputeTaskPool::get();
+    let Some(channel) = channel else { return };
 
     for event in events.read() {
         // 设置加载状态（上传操作除外）
@@ -46,68 +66,80 @@ pub fn handle_api_requests(
         }
         
         let client = (*api_client).clone();
+        let sender = channel.sender.clone();
 
-        let task = match event {
+        match event {
             // ====== Novel APIs ======
-            ApiRequest::LoadNovels => pool.spawn(async move {
-                match client.list_novels() {
-                    Ok(novels) => ApiResponse::NovelsLoaded(novels),
-                    Err(e) => ApiResponse::Error(e.to_string()),
-                }
-            }),
-            ApiRequest::LoadVoices => pool.spawn(async move {
-                match client.list_voices() {
-                    Ok(voices) => ApiResponse::VoicesLoaded(voices),
-                    Err(e) => ApiResponse::Error(e.to_string()),
-                }
-            }),
+            ApiRequest::LoadNovels => {
+                std::thread::spawn(move || {
+                    let response = match client.list_novels() {
+                        Ok(novels) => ApiResponse::NovelsLoaded(novels),
+                        Err(e) => ApiResponse::Error(e.to_string()),
+                    };
+                    let _ = sender.send(response);
+                });
+            }
+            ApiRequest::LoadVoices => {
+                std::thread::spawn(move || {
+                    let response = match client.list_voices() {
+                        Ok(voices) => ApiResponse::VoicesLoaded(voices),
+                        Err(e) => ApiResponse::Error(e.to_string()),
+                    };
+                    let _ = sender.send(response);
+                });
+            }
             ApiRequest::UploadNovel { title, file_path } => {
                 let title = title.clone();
                 let path = file_path.clone();
-                pool.spawn(async move {
-                    match client.upload_novel(&title, &path) {
+                std::thread::spawn(move || {
+                    let response = match client.upload_novel(&title, &path) {
                         Ok(novel) => ApiResponse::NovelUploaded(novel),
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::UploadVoice { name, description, file_path } => {
                 let name = name.clone();
                 let desc = description.clone();
                 let path = file_path.clone();
-                pool.spawn(async move {
-                    match client.upload_voice(&name, desc.as_deref(), &path) {
+                std::thread::spawn(move || {
+                    let response = match client.upload_voice(&name, desc.as_deref(), &path) {
                         Ok(voice) => ApiResponse::VoiceUploaded(voice),
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::DeleteNovel(id) => {
                 let id = *id;
-                pool.spawn(async move {
-                    match client.delete_novel(id) {
+                std::thread::spawn(move || {
+                    let response = match client.delete_novel(id) {
                         Ok(_) => ApiResponse::NovelDeleted(id),
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::DeleteVoice(id) => {
                 let id = *id;
-                pool.spawn(async move {
-                    match client.delete_voice(id) {
+                std::thread::spawn(move || {
+                    let response = match client.delete_voice(id) {
                         Ok(_) => ApiResponse::VoiceDeleted(id),
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::PollNovelStatus(id) => {
                 let id = *id;
-                pool.spawn(async move {
-                    match client.get_novel(id) {
+                std::thread::spawn(move || {
+                    let response = match client.get_novel(id) {
                         Ok(novel) => ApiResponse::NovelStatusUpdated(novel),
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
 
             // ====== Session APIs (V2) ======
@@ -115,8 +147,8 @@ pub fn handle_api_requests(
                 let novel_id = *novel_id;
                 let voice_id = *voice_id;
                 let start_index = *start_index;
-                pool.spawn(async move {
-                    match client.play(novel_id, voice_id, start_index) {
+                std::thread::spawn(move || {
+                    let response = match client.play(novel_id, voice_id, start_index) {
                         Ok(resp) => ApiResponse::PlayStarted {
                             session_id: resp.session_id,
                             novel_id: resp.novel_id,
@@ -124,66 +156,72 @@ pub fn handle_api_requests(
                             current_index: resp.current_index,
                         },
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::Seek { session_id, segment_index } => {
                 let session_id = session_id.clone();
                 let segment_index = *segment_index;
-                pool.spawn(async move {
-                    match client.seek(&session_id, segment_index) {
+                std::thread::spawn(move || {
+                    let response = match client.seek(&session_id, segment_index) {
                         Ok(resp) => ApiResponse::SeekCompleted {
                             session_id: resp.session_id,
                             current_index: resp.current_index,
                             cancelled_tasks: resp.cancelled_tasks,
                         },
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::ChangeVoice { session_id, voice_id } => {
                 let session_id = session_id.clone();
                 let voice_id = *voice_id;
-                pool.spawn(async move {
-                    match client.change_voice(&session_id, voice_id) {
+                std::thread::spawn(move || {
+                    let response = match client.change_voice(&session_id, voice_id) {
                         Ok(resp) => ApiResponse::VoiceChanged {
                             session_id: resp.session_id,
                             voice_id: resp.voice_id,
                             cancelled_tasks: resp.cancelled_tasks,
                         },
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::CloseSession(session_id) => {
                 let session_id = session_id.clone();
-                pool.spawn(async move {
-                    match client.close_session(&session_id) {
+                std::thread::spawn(move || {
+                    let response = match client.close_session(&session_id) {
                         Ok(resp) => ApiResponse::SessionClosed(resp.session_id),
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
 
             // ====== Inference APIs (V2) ======
             ApiRequest::SubmitInfer { session_id, segment_indices } => {
                 let session_id = session_id.clone();
                 let segment_indices = segment_indices.clone();
-                pool.spawn(async move {
-                    match client.submit_infer(&session_id, segment_indices) {
+                std::thread::spawn(move || {
+                    let response = match client.submit_infer(&session_id, segment_indices) {
                         Ok(resp) => ApiResponse::InferSubmitted { tasks: resp.tasks },
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
             ApiRequest::QueryTaskStatus { task_ids } => {
                 let task_ids = task_ids.clone();
-                pool.spawn(async move {
-                    match client.query_task_status(task_ids) {
+                std::thread::spawn(move || {
+                    let response = match client.query_task_status(task_ids) {
                         Ok(resp) => ApiResponse::TaskStatusQueried { tasks: resp.tasks },
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
 
             // ====== Audio API (V2) ======
@@ -191,8 +229,8 @@ pub fn handle_api_requests(
                 let novel_id = *novel_id;
                 let segment_index = *segment_index;
                 let voice_id = *voice_id;
-                pool.spawn(async move {
-                    match client.get_audio(novel_id, segment_index, voice_id) {
+                std::thread::spawn(move || {
+                    let response = match client.get_audio(novel_id, segment_index, voice_id) {
                         Ok(Some(data)) => ApiResponse::AudioLoaded {
                             novel_id,
                             segment_index,
@@ -203,8 +241,9 @@ pub fn handle_api_requests(
                             segment_index,
                         },
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
 
             // ====== Segments ======
@@ -212,35 +251,35 @@ pub fn handle_api_requests(
                 let novel_id = *novel_id;
                 let start = *start;
                 let limit = *limit;
-                pool.spawn(async move {
-                    match client.get_novel_segments(novel_id, start, limit) {
+                std::thread::spawn(move || {
+                    let response = match client.get_novel_segments(novel_id, start, limit) {
                         Ok(resp) => ApiResponse::SegmentsLoaded {
                             novel_id: resp.novel_id,
                             total: resp.total,
                             segments: resp.segments,
                         },
                         Err(e) => ApiResponse::Error(e.to_string()),
-                    }
-                })
+                    };
+                    let _ = sender.send(response);
+                });
             }
         };
-
-        commands.spawn(ApiTask(task));
     }
 }
 
-/// 轮询 API 任务完成
+/// 轮询 API 响应通道
 pub fn poll_api_tasks(
-    mut commands: Commands,
-    mut tasks: Query<(Entity, &mut ApiTask)>,
+    channel: Option<Res<ApiResponseChannel>>,
     mut response_events: EventWriter<ApiResponse>,
 ) {
-    for (entity, mut task) in tasks.iter_mut() {
-        if let Some(response) = future::block_on(future::poll_once(&mut task.0)) {
+    let Some(channel) = channel else { return };
+    
+    // Non-blocking receive with mutex
+    if let Ok(receiver) = channel.receiver.lock() {
+        while let Ok(response) = receiver.try_recv() {
             response_events.send(response);
-            commands.entity(entity).despawn();
         }
-    }
+    };
 }
 
 /// 处理 API 响应 - V2

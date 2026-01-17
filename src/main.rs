@@ -28,7 +28,7 @@ use state::{
 use systems::{
     cleanup_stale_tasks_system, clear_error_timer, handle_api_requests, handle_api_responses,
     handle_audio_finished, handle_ws_responses, poll_api_tasks, poll_processing_novels,
-    prefetch_tasks_system, startup_load,
+    prefetch_tasks_system, setup_api_channel, startup_load,
 };
 use ui::ui_system;
 use websocket::{handle_ws_requests, poll_ws_responses, setup_ws_client};
@@ -51,6 +51,8 @@ fn main() {
         .insert_resource(ApiClient::default())
         // 音频播放器
         .add_systems(Startup, setup_audio)
+        // API 响应通道
+        .add_systems(Startup, setup_api_channel)
         // 文件选择器通道
         .add_systems(Startup, setup_file_picker_channel)
         // WebSocket 客户端
