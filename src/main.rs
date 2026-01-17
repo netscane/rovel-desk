@@ -121,25 +121,59 @@ fn configure_fonts(mut contexts: EguiContexts) {
     // 加载系统中文字体
     let mut fonts = egui::FontDefinitions::default();
     
-    // 尝试加载 macOS 中文字体
-    if let Ok(font_data) = std::fs::read("/System/Library/Fonts/STHeiti Medium.ttc") {
-        fonts.font_data.insert(
-            "chinese".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_owned(font_data)),
-        );
-        
-        // 将中文字体添加到所有字体族
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "chinese".to_owned());
-        
-        fonts
-            .families
-            .entry(egui::FontFamily::Monospace)
-            .or_default()
-            .push("chinese".to_owned());
+    // 根据平台尝试不同的字体路径
+    let font_paths: Vec<&str> = if cfg!(target_os = "macos") {
+        vec![
+            "/System/Library/Fonts/STHeiti Medium.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        ]
+    } else if cfg!(target_os = "windows") {
+        vec![
+            "C:\\Windows\\Fonts\\msyh.ttc",      // 微软雅黑
+            "C:\\Windows\\Fonts\\simsun.ttc",    // 宋体
+            "C:\\Windows\\Fonts\\simhei.ttf",    // 黑体
+        ]
+    } else {
+        // Linux
+        vec![
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        ]
+    };
+    
+    // 尝试加载第一个可用的字体
+    let mut font_loaded = false;
+    for path in font_paths {
+        if let Ok(font_data) = std::fs::read(path) {
+            fonts.font_data.insert(
+                "chinese".to_owned(),
+                std::sync::Arc::new(egui::FontData::from_owned(font_data)),
+            );
+            
+            // 将中文字体添加到所有字体族（优先级最高）
+            fonts
+                .families
+                .entry(egui::FontFamily::Proportional)
+                .or_default()
+                .insert(0, "chinese".to_owned());
+            
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("chinese".to_owned());
+            
+            tracing::info!("Loaded Chinese font from: {}", path);
+            font_loaded = true;
+            break;
+        }
+    }
+    
+    if !font_loaded {
+        tracing::warn!("No Chinese font found! Chinese characters may not display correctly.");
     }
     
     ctx.set_fonts(fonts);
