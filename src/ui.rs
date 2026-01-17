@@ -267,6 +267,7 @@ fn novel_list_ui(
             } else {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     let mut voice_to_delete: Option<uuid::Uuid> = None;
+                    let mut voice_to_select: Option<crate::api::VoiceResponse> = None;
 
                     for voice in &app_state.voices {
                         let is_selected = app_state
@@ -281,7 +282,8 @@ fn novel_list_ui(
                             colors::BG_CARD
                         };
 
-                        egui::Frame::none()
+                        // 整个卡片可点击
+                        let card_response = egui::Frame::none()
                             .fill(card_color)
                             .rounding(10.0)
                             .inner_margin(12.0)
@@ -302,19 +304,11 @@ fn novel_list_ui(
                                         } else {
                                             colors::TEXT_SECONDARY
                                         };
-                                        if ui
-                                            .add(
-                                                egui::Label::new(
-                                                    egui::RichText::new(&voice.name)
-                                                        .size(14.0)
-                                                        .color(name_color),
-                                                )
-                                                .sense(egui::Sense::click()),
-                                            )
-                                            .clicked()
-                                        {
-                                            app_state.selected_voice = Some(voice.clone());
-                                        }
+                                        ui.label(
+                                            egui::RichText::new(&voice.name)
+                                                .size(14.0)
+                                                .color(name_color),
+                                        );
 
                                         if let Some(desc) = &voice.description {
                                             if !desc.is_empty() {
@@ -337,9 +331,21 @@ fn novel_list_ui(
                                     );
                                 });
                             });
+                        
+                        // 点击卡片选中（排除删除按钮区域的点击）
+                        if card_response.response.interact(egui::Sense::click()).clicked() 
+                            && voice_to_delete.is_none() 
+                        {
+                            voice_to_select = Some(voice.clone());
+                        }
+                        
                         ui.add_space(6.0);
                     }
 
+                    // 在循环外处理选择和删除
+                    if let Some(voice) = voice_to_select {
+                        app_state.selected_voice = Some(voice);
+                    }
                     if let Some(id) = voice_to_delete {
                         api_events.send(ApiRequest::DeleteVoice(id));
                     }
