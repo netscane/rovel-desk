@@ -54,9 +54,14 @@ pub fn handle_api_requests(
     mut app_state: ResMut<AppState>,
     channel: Option<Res<ApiResponseChannel>>,
 ) {
-    let Some(channel) = channel else { return };
+    let Some(channel) = channel else { 
+        tracing::warn!("ApiResponseChannel not available");
+        return; 
+    };
 
     for event in events.read() {
+        tracing::info!("Processing API request: {:?}", std::any::type_name_of_val(event));
+        
         // 设置加载状态（上传操作除外）
         match event {
             ApiRequest::UploadNovel { .. } | ApiRequest::UploadVoice { .. } => {}
@@ -72,31 +77,58 @@ pub fn handle_api_requests(
             // ====== Novel APIs ======
             ApiRequest::LoadNovels => {
                 std::thread::spawn(move || {
+                    tracing::info!("Thread: LoadNovels starting");
                     let response = match client.list_novels() {
-                        Ok(novels) => ApiResponse::NovelsLoaded(novels),
-                        Err(e) => ApiResponse::Error(e.to_string()),
+                        Ok(novels) => {
+                            tracing::info!("Thread: LoadNovels success, {} novels", novels.len());
+                            ApiResponse::NovelsLoaded(novels)
+                        }
+                        Err(e) => {
+                            tracing::error!("Thread: LoadNovels error: {}", e);
+                            ApiResponse::Error(e.to_string())
+                        }
                     };
-                    let _ = sender.send(response);
+                    if let Err(e) = sender.send(response) {
+                        tracing::error!("Thread: Failed to send response: {}", e);
+                    }
                 });
             }
             ApiRequest::LoadVoices => {
                 std::thread::spawn(move || {
+                    tracing::info!("Thread: LoadVoices starting");
                     let response = match client.list_voices() {
-                        Ok(voices) => ApiResponse::VoicesLoaded(voices),
-                        Err(e) => ApiResponse::Error(e.to_string()),
+                        Ok(voices) => {
+                            tracing::info!("Thread: LoadVoices success, {} voices", voices.len());
+                            ApiResponse::VoicesLoaded(voices)
+                        }
+                        Err(e) => {
+                            tracing::error!("Thread: LoadVoices error: {}", e);
+                            ApiResponse::Error(e.to_string())
+                        }
                     };
-                    let _ = sender.send(response);
+                    if let Err(e) = sender.send(response) {
+                        tracing::error!("Thread: Failed to send response: {}", e);
+                    }
                 });
             }
             ApiRequest::UploadNovel { title, file_path } => {
                 let title = title.clone();
                 let path = file_path.clone();
                 std::thread::spawn(move || {
+                    tracing::info!("Thread: UploadNovel starting, title={}", title);
                     let response = match client.upload_novel(&title, &path) {
-                        Ok(novel) => ApiResponse::NovelUploaded(novel),
-                        Err(e) => ApiResponse::Error(e.to_string()),
+                        Ok(novel) => {
+                            tracing::info!("Thread: UploadNovel success");
+                            ApiResponse::NovelUploaded(novel)
+                        }
+                        Err(e) => {
+                            tracing::error!("Thread: UploadNovel error: {}", e);
+                            ApiResponse::Error(e.to_string())
+                        }
                     };
-                    let _ = sender.send(response);
+                    if let Err(e) = sender.send(response) {
+                        tracing::error!("Thread: Failed to send response: {}", e);
+                    }
                 });
             }
             ApiRequest::UploadVoice { name, description, file_path } => {
@@ -104,11 +136,20 @@ pub fn handle_api_requests(
                 let desc = description.clone();
                 let path = file_path.clone();
                 std::thread::spawn(move || {
+                    tracing::info!("Thread: UploadVoice starting, name={}", name);
                     let response = match client.upload_voice(&name, desc.as_deref(), &path) {
-                        Ok(voice) => ApiResponse::VoiceUploaded(voice),
-                        Err(e) => ApiResponse::Error(e.to_string()),
+                        Ok(voice) => {
+                            tracing::info!("Thread: UploadVoice success");
+                            ApiResponse::VoiceUploaded(voice)
+                        }
+                        Err(e) => {
+                            tracing::error!("Thread: UploadVoice error: {}", e);
+                            ApiResponse::Error(e.to_string())
+                        }
                     };
-                    let _ = sender.send(response);
+                    if let Err(e) = sender.send(response) {
+                        tracing::error!("Thread: Failed to send response: {}", e);
+                    }
                 });
             }
             ApiRequest::DeleteNovel(id) => {

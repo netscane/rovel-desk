@@ -274,7 +274,6 @@ struct GetAudioRequest {
 
 #[derive(Clone, Resource)]
 pub struct ApiClient {
-    client: reqwest::blocking::Client,
     base_url: String,
 }
 
@@ -287,29 +286,39 @@ impl Default for ApiClient {
 impl ApiClient {
     pub fn new(base_url: String) -> Self {
         Self {
-            client: reqwest::blocking::Client::new(),
             base_url,
         }
+    }
+    
+    /// 创建新的 HTTP client（每次请求创建新实例，避免连接池问题）
+    fn new_client() -> reqwest::blocking::Client {
+        reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .unwrap_or_else(|_| reqwest::blocking::Client::new())
     }
 
     /// 通用 GET 请求
     fn get<T: DeserializeOwned>(&self, endpoint: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let resp: ApiResponse<T> = self.client.get(&url).send()?.json()?;
+        let client = Self::new_client();
+        let resp: ApiResponse<T> = client.get(&url).send()?.json()?;
         resp.into_result()
     }
 
     /// 通用 POST 请求
     fn post<R: Serialize, T: DeserializeOwned>(&self, endpoint: &str, body: &R) -> Result<T> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let resp: ApiResponse<T> = self.client.post(&url).json(body).send()?.json()?;
+        let client = Self::new_client();
+        let resp: ApiResponse<T> = client.post(&url).json(body).send()?.json()?;
         resp.into_result()
     }
 
     /// POST 请求（无返回数据）
     fn post_empty<R: Serialize>(&self, endpoint: &str, body: &R) -> Result<()> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let resp: ApiResponse<EmptyData> = self.client.post(&url).json(body).send()?.json()?;
+        let client = Self::new_client();
+        let resp: ApiResponse<EmptyData> = client.post(&url).json(body).send()?.json()?;
         if resp.errno == 0 {
             Ok(())
         } else {
@@ -351,8 +360,9 @@ impl ApiClient {
                     .mime_str("text/plain; charset=utf-8")?,
             );
 
+        let client = Self::new_client();
         let resp: ApiResponse<NovelResponse> =
-            self.client.post(&url).multipart(form).send()?.json()?;
+            client.post(&url).multipart(form).send()?.json()?;
         resp.into_result()
     }
 
@@ -402,8 +412,9 @@ impl ApiClient {
             form = form.text("description", desc.to_string());
         }
 
+        let client = Self::new_client();
         let resp: ApiResponse<VoiceResponse> =
-            self.client.post(&url).multipart(form).send()?.json()?;
+            client.post(&url).multipart(form).send()?.json()?;
         resp.into_result()
     }
 
@@ -467,8 +478,8 @@ impl ApiClient {
     /// V2: 获取音频 (通过 novel_id + segment_index + voice_id)
     pub fn get_audio(&self, novel_id: Uuid, segment_index: u32, voice_id: Uuid) -> Result<Option<Vec<u8>>> {
         let url = format!("{}/audio", self.base_url);
-        let resp = self
-            .client
+        let client = Self::new_client();
+        let resp = client
             .post(&url)
             .json(&GetAudioRequest {
                 novel_id,
