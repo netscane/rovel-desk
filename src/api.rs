@@ -19,6 +19,34 @@ const BASE_URL: &str = "http://192.168.2.31:5060/api";
 pub const WS_BASE_URL: &str = "ws://192.168.2.31:5060/ws";
 
 // ============================================================================
+// 编码检测和转换
+// ============================================================================
+
+/// 检测文件编码并转换为 UTF-8
+fn convert_to_utf8(bytes: &[u8]) -> Result<String> {
+    // 首先尝试直接解析为 UTF-8
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        tracing::info!("File is already UTF-8");
+        return Ok(text.to_string());
+    }
+    
+    // 使用 chardetng 检测编码
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(bytes, true);
+    let encoding = detector.guess(None, true);
+    tracing::info!("Detected encoding: {}", encoding.name());
+    
+    // 使用 encoding_rs 转换
+    let (text, _, had_errors) = encoding.decode(bytes);
+    
+    if had_errors {
+        tracing::warn!("Encoding conversion had some errors, but continuing");
+    }
+    
+    Ok(text.into_owned())
+}
+
+// ============================================================================
 // 统一响应格式
 // ============================================================================
 
@@ -423,11 +451,15 @@ impl ApiClient {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("novel.txt");
-        let file_content = std::fs::read(file_path).map_err(|e| {
+        let file_bytes = std::fs::read(file_path).map_err(|e| {
             tracing::error!("Failed to read file {:?}: {}", file_path, e);
             anyhow::anyhow!("Failed to read file: {}", e)
         })?;
-        tracing::info!("File read: {} bytes", file_content.len());
+        tracing::info!("File read: {} bytes", file_bytes.len());
+
+        // 检测并转换编码为 UTF-8
+        let file_content = convert_to_utf8(&file_bytes)?;
+        tracing::info!("File converted to UTF-8: {} bytes", file_content.len());
 
         // 构建 multipart form
         let boundary = format!("----WebKitFormBoundary{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
@@ -446,7 +478,7 @@ impl ApiClient {
             file_name
         ).as_bytes());
         body.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n\r\n");
-        body.extend_from_slice(&file_content);
+        body.extend_from_slice(file_content.as_bytes());
         body.extend_from_slice(b"\r\n");
         
         // 结束边界
