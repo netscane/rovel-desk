@@ -393,17 +393,15 @@ fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<W
                     // 非阻塞模式下没有数据，正常情况
                 }
                 Err(e) => {
-                    // 检查是否是致命错误
                     let error_str = e.to_string();
+                    // Winsock 错误也继续尝试重连，只是记录日志
                     if error_str.contains("10093") || error_str.contains("WSAStartup") {
-                        tracing::warn!("Global WebSocket fatal error: {}, stopping", e);
-                        should_reconnect = false;
-                        current_socket = None;
+                        tracing::warn!("Global WebSocket Winsock error: {}, will retry", e);
                     } else {
                         tracing::warn!("Global WebSocket error: {}", e);
-                        current_socket = None;
-                        // 断开后会自动重连
                     }
+                    current_socket = None;
+                    // 断开后会自动重连
                 }
                 _ => {}
             }
