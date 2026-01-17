@@ -5,10 +5,14 @@
 //! - 客户端驱动推理任务提交
 //! - WebSocket 实时推送任务状态
 //! - 音频通过 novel_id + segment_index + voice_id 获取
+//!
+//! Note: 使用 ureq（纯同步 HTTP 客户端）替代 reqwest::blocking
+//! 避免 Windows 上 file picker 后 tokio runtime 问题
 
 use anyhow::Result;
 use bevy::prelude::Resource;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::io::Read;
 use uuid::Uuid;
 
 const BASE_URL: &str = "http://192.168.2.31:5060/api";
@@ -72,11 +76,6 @@ impl NovelResponse {
             created_at: chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string(),
             is_temporary: true,
         }
-    }
-    
-    /// 检查是否为临时对象
-    pub fn is_temporary(&self) -> bool {
-        self.is_temporary
     }
 }
 
@@ -269,7 +268,7 @@ struct GetAudioRequest {
 }
 
 // ============================================================================
-// API Client (Blocking) - V2
+// API Client (using ureq - pure sync, no tokio) - V2
 // ============================================================================
 
 #[derive(Clone, Resource)]
@@ -290,39 +289,75 @@ impl ApiClient {
         }
     }
     
-    /// 创建新的 HTTP client（每次请求创建新实例，避免连接池问题）
-    fn new_client() -> reqwest::blocking::Client {
-        reqwest::blocking::Client::builder()
+    /// 创建新的 ureq agent（纯同步，无 tokio 依赖）
+    fn new_agent() -> ureq::Agent {
+        ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(60))
             .build()
-            .unwrap_or_else(|_| reqwest::blocking::Client::new())
     }
 
     /// 通用 GET 请求
     fn get<T: DeserializeOwned>(&self, endpoint: &str) -> Result<T> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let client = Self::new_client();
-        let resp: ApiResponse<T> = client.get(&url).send()?.json()?;
-        resp.into_result()
+        tracing::debug!("API GET: {}", url);
+        
+        let agent = Self::new_agent();
+        let resp = agent.get(&url).call().map_err(|e| {
+            tracing::error!("GET {} error: {}", url, e);
+            anyhow::anyhow!("HTTP GET error: {}", e)
+        })?;
+        
+        let api_resp: ApiResponse<T> = resp.into_json().map_err(|e| {
+            tracing::error!("GET {} json parse error: {}", url, e);
+            anyhow::anyhow!("JSON parse error: {}", e)
+        })?;
+        api_resp.into_result()
     }
 
     /// 通用 POST 请求
     fn post<R: Serialize, T: DeserializeOwned>(&self, endpoint: &str, body: &R) -> Result<T> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let client = Self::new_client();
-        let resp: ApiResponse<T> = client.post(&url).json(body).send()?.json()?;
-        resp.into_result()
+        tracing::debug!("API POST: {}", url);
+        
+        let agent = Self::new_agent();
+        let resp = agent.post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(body)
+            .map_err(|e| {
+                tracing::error!("POST {} error: {}", url, e);
+                anyhow::anyhow!("HTTP POST error: {}", e)
+            })?;
+        
+        let api_resp: ApiResponse<T> = resp.into_json().map_err(|e| {
+            tracing::error!("POST {} json parse error: {}", url, e);
+            anyhow::anyhow!("JSON parse error: {}", e)
+        })?;
+        api_resp.into_result()
     }
 
     /// POST 请求（无返回数据）
     fn post_empty<R: Serialize>(&self, endpoint: &str, body: &R) -> Result<()> {
         let url = format!("{}{}", self.base_url, endpoint);
-        let client = Self::new_client();
-        let resp: ApiResponse<EmptyData> = client.post(&url).json(body).send()?.json()?;
-        if resp.errno == 0 {
+        tracing::debug!("API POST (empty): {}", url);
+        
+        let agent = Self::new_agent();
+        let resp = agent.post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(body)
+            .map_err(|e| {
+                tracing::error!("POST {} error: {}", url, e);
+                anyhow::anyhow!("HTTP POST error: {}", e)
+            })?;
+        
+        let api_resp: ApiResponse<EmptyData> = resp.into_json().map_err(|e| {
+            tracing::error!("POST {} json parse error: {}", url, e);
+            anyhow::anyhow!("JSON parse error: {}", e)
+        })?;
+        
+        if api_resp.errno == 0 {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("API error ({}): {}", resp.errno, resp.error))
+            Err(anyhow::anyhow!("API error ({}): {}", api_resp.errno, api_resp.error))
         }
     }
 
@@ -345,25 +380,58 @@ impl ApiClient {
 
     pub fn upload_novel(&self, title: &str, file_path: &std::path::Path) -> Result<NovelResponse> {
         let url = format!("{}/novel/upload", self.base_url);
+        tracing::info!("API upload_novel: url={}, title={}, path={:?}", url, title, file_path);
+        
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("novel.txt");
-        let file_content = std::fs::read(file_path)?;
+        let file_content = std::fs::read(file_path).map_err(|e| {
+            tracing::error!("Failed to read file {:?}: {}", file_path, e);
+            anyhow::anyhow!("Failed to read file: {}", e)
+        })?;
+        tracing::info!("File read: {} bytes", file_content.len());
 
-        let form = reqwest::blocking::multipart::Form::new()
-            .text("title", title.to_string())
-            .part(
-                "file",
-                reqwest::blocking::multipart::Part::bytes(file_content)
-                    .file_name(file_name.to_string())
-                    .mime_str("text/plain; charset=utf-8")?,
-            );
+        // 构建 multipart form
+        let boundary = format!("----WebKitFormBoundary{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let mut body = Vec::new();
+        
+        // title 字段
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"title\"\r\n\r\n");
+        body.extend_from_slice(title.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        
+        // file 字段
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            file_name
+        ).as_bytes());
+        body.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n\r\n");
+        body.extend_from_slice(&file_content);
+        body.extend_from_slice(b"\r\n");
+        
+        // 结束边界
+        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
-        let client = Self::new_client();
-        let resp: ApiResponse<NovelResponse> =
-            client.post(&url).multipart(form).send()?.json()?;
-        resp.into_result()
+        let agent = Self::new_agent();
+        tracing::info!("Sending upload request...");
+        let resp = agent.post(&url)
+            .set("Content-Type", &format!("multipart/form-data; boundary={}", boundary))
+            .send_bytes(&body)
+            .map_err(|e| {
+                tracing::error!("upload_novel error: {}", e);
+                anyhow::anyhow!("Upload error: {}", e)
+            })?;
+        
+        tracing::info!("Upload response status: {}", resp.status());
+        
+        let api_resp: ApiResponse<NovelResponse> = resp.into_json().map_err(|e| {
+            tracing::error!("upload_novel json parse error: {}", e);
+            anyhow::anyhow!("JSON parse error: {}", e)
+        })?;
+        api_resp.into_result()
     }
 
     pub fn delete_novel(&self, id: Uuid) -> Result<()> {
@@ -385,6 +453,8 @@ impl ApiClient {
         file_path: &std::path::Path,
     ) -> Result<VoiceResponse> {
         let url = format!("{}/voice/upload", self.base_url);
+        tracing::info!("API upload_voice: url={}, name={}, path={:?}", url, name, file_path);
+        
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -399,23 +469,48 @@ impl ApiClient {
             _ => "audio/wav",
         };
 
-        let mut form = reqwest::blocking::multipart::Form::new()
-            .text("name", name.to_string())
-            .part(
-                "file",
-                reqwest::blocking::multipart::Part::bytes(file_content)
-                    .file_name(file_name.to_string())
-                    .mime_str(mime_type)?,
-            );
-
+        // 构建 multipart form
+        let boundary = format!("----WebKitFormBoundary{}", uuid::Uuid::new_v4().to_string().replace("-", ""));
+        let mut body = Vec::new();
+        
+        // name 字段
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(b"Content-Disposition: form-data; name=\"name\"\r\n\r\n");
+        body.extend_from_slice(name.as_bytes());
+        body.extend_from_slice(b"\r\n");
+        
+        // description 字段（可选）
         if let Some(desc) = description {
-            form = form.text("description", desc.to_string());
+            body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+            body.extend_from_slice(b"Content-Disposition: form-data; name=\"description\"\r\n\r\n");
+            body.extend_from_slice(desc.as_bytes());
+            body.extend_from_slice(b"\r\n");
         }
+        
+        // file 字段
+        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+        body.extend_from_slice(format!(
+            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
+            file_name
+        ).as_bytes());
+        body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", mime_type).as_bytes());
+        body.extend_from_slice(&file_content);
+        body.extend_from_slice(b"\r\n");
+        
+        // 结束边界
+        body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
 
-        let client = Self::new_client();
-        let resp: ApiResponse<VoiceResponse> =
-            client.post(&url).multipart(form).send()?.json()?;
-        resp.into_result()
+        let agent = Self::new_agent();
+        let resp = agent.post(&url)
+            .set("Content-Type", &format!("multipart/form-data; boundary={}", boundary))
+            .send_bytes(&body)
+            .map_err(|e| {
+                tracing::error!("upload_voice error: {}", e);
+                anyhow::anyhow!("Upload error: {}", e)
+            })?;
+        
+        let api_resp: ApiResponse<VoiceResponse> = resp.into_json()?;
+        api_resp.into_result()
     }
 
     pub fn delete_voice(&self, id: Uuid) -> Result<()> {
@@ -478,37 +573,33 @@ impl ApiClient {
     /// V2: 获取音频 (通过 novel_id + segment_index + voice_id)
     pub fn get_audio(&self, novel_id: Uuid, segment_index: u32, voice_id: Uuid) -> Result<Option<Vec<u8>>> {
         let url = format!("{}/audio", self.base_url);
-        let client = Self::new_client();
-        let resp = client
-            .post(&url)
-            .json(&GetAudioRequest {
+        let agent = Self::new_agent();
+        
+        let resp = agent.post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(&GetAudioRequest {
                 novel_id,
                 segment_index,
                 voice_id,
             })
-            .send()?;
+            .map_err(|e| anyhow::anyhow!("Audio request error: {}", e))?;
 
-        if resp.status().is_success() {
-            // 检查是否是 JSON 错误响应
-            let content_type = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-
-            if content_type.contains("application/json") {
-                let api_resp: ApiResponse<EmptyData> = resp.json()?;
-                if api_resp.errno != 0 {
-                    return Ok(None); // 音频未准备好
-                }
-                Ok(None)
-            } else {
-                // 二进制音频数据
-                let bytes = resp.bytes()?;
-                Ok(Some(bytes.to_vec()))
+        // 检查 Content-Type
+        let content_type = resp.header("content-type").unwrap_or("");
+        
+        if content_type.contains("application/json") {
+            // JSON 响应 - 可能是错误或音频未准备好
+            let api_resp: ApiResponse<EmptyData> = resp.into_json()?;
+            if api_resp.errno != 0 {
+                return Ok(None); // 音频未准备好
             }
-        } else {
             Ok(None)
+        } else {
+            // 二进制音频数据
+            let mut reader = resp.into_reader();
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            Ok(Some(bytes))
         }
     }
 }
