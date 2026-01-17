@@ -461,16 +461,32 @@ pub enum WsRequest {
 /// WebSocket 响应事件
 #[derive(Event)]
 pub enum WsResponse {
-    /// 连接成功
+    /// Session channel 连接成功
     Connected,
-    /// 连接断开
+    /// Session channel 连接断开
     Disconnected,
-    /// 收到任务状态变更
+    /// 收到任务状态变更 (session channel)
     TaskStateChanged(WsEvent),
-    /// Session 被服务端关闭
+    /// Session 被服务端关闭 (session channel)
     SessionClosedByServer { session_id: String, reason: String },
-    /// 连接错误
+    /// Session channel 连接错误
     Error(String),
+    /// Global channel 连接成功
+    GlobalConnected,
+    /// Global channel 连接断开
+    GlobalDisconnected,
+    /// 小说处理完成 (global channel)
+    NovelReady { novel_id: Uuid, title: String, total_segments: usize },
+    /// 小说处理失败 (global channel)
+    NovelFailed { novel_id: Uuid, error: String },
+    /// 小说删除中 (global channel)
+    NovelDeleting { novel_id: Uuid },
+    /// 小说删除完成 (global channel)
+    NovelDeleted { novel_id: Uuid },
+    /// 小说删除失败 (global channel)
+    NovelDeleteFailed { novel_id: Uuid, error: String },
+    /// 音色删除完成 (global channel)
+    VoiceDeleted { voice_id: Uuid },
 }
 
 // ============================================================================

@@ -354,6 +354,7 @@ pub fn handle_api_responses(
                 app_state.clear_error();
             }
             ApiResponse::NovelUploaded(novel) => {
+                tracing::info!("NovelUploaded: id={}, title={}, status={}", novel.id, novel.title, novel.status);
                 // 替换临时小说对象
                 let mut temp_found = false;
                 for existing in app_state.novels.iter_mut() {
@@ -366,9 +367,9 @@ pub fn handle_api_responses(
                 if !temp_found {
                     app_state.novels.push(novel.clone());
                 }
-                if novel.status == "processing" {
-                    app_state.processing_novels.insert(novel.id);
-                }
+                tracing::info!("NovelUploaded: novels count={}, ids={:?}", 
+                    app_state.novels.len(),
+                    app_state.novels.iter().map(|n| n.id.to_string()).collect::<Vec<_>>());
                 app_state.clear_error();
             }
             ApiResponse::VoiceUploaded(voice) => {
@@ -718,6 +719,66 @@ pub fn handle_ws_responses(
                 app_state.ws_state = crate::state::WsConnectionState::Disconnected;
                 // 不设置为全局错误，只记录
                 tracing::warn!("WebSocket error: {}", msg);
+            }
+            // Global channel 事件
+            WsResponse::GlobalConnected => {
+                tracing::info!("Global WebSocket connected");
+            }
+            WsResponse::GlobalDisconnected => {
+                tracing::info!("Global WebSocket disconnected");
+            }
+            WsResponse::NovelReady { novel_id, title, total_segments } => {
+                tracing::info!("NovelReady: novel_id={}, title={}, total_segments={}", novel_id, title, total_segments);
+                // 用 novel_id 匹配
+                if let Some(novel) = app_state.novels.iter_mut().find(|n| n.id == *novel_id) {
+                    novel.status = "ready".to_string();
+                    novel.total_segments = *total_segments;
+                    novel.is_temporary = false;
+                } else {
+                    tracing::warn!("NovelReady: no matching novel found for id={}", novel_id);
+                }
+            }
+            WsResponse::NovelFailed { novel_id, error } => {
+                tracing::warn!("NovelFailed: novel_id={}, error={}", novel_id, error);
+                // 用 novel_id 匹配
+                if let Some(novel) = app_state.novels.iter_mut().find(|n| n.id == *novel_id) {
+                    novel.status = "error".to_string();
+                    novel.is_temporary = false;
+                }
+                app_state.set_error(format!("Novel processing failed: {}", error));
+            }
+            WsResponse::NovelDeleting { novel_id } => {
+                tracing::info!("NovelDeleting: novel_id={}", novel_id);
+                // 更新状态为删除中
+                if let Some(novel) = app_state.novels.iter_mut().find(|n| n.id == *novel_id) {
+                    novel.status = "deleting".to_string();
+                }
+            }
+            WsResponse::NovelDeleted { novel_id } => {
+                tracing::info!("NovelDeleted: novel_id={}", novel_id);
+                // 从列表中移除
+                app_state.novels.retain(|n| n.id != *novel_id);
+                // 如果删除的是当前选中的小说，清除选中状态
+                if app_state.selected_novel.as_ref().map(|n| n.id) == Some(*novel_id) {
+                    app_state.selected_novel = None;
+                }
+            }
+            WsResponse::NovelDeleteFailed { novel_id, error } => {
+                tracing::warn!("NovelDeleteFailed: novel_id={}, error={}", novel_id, error);
+                // 恢复状态
+                if let Some(novel) = app_state.novels.iter_mut().find(|n| n.id == *novel_id) {
+                    novel.status = "ready".to_string();
+                }
+                app_state.set_error(format!("Novel delete failed: {}", error));
+            }
+            WsResponse::VoiceDeleted { voice_id } => {
+                tracing::info!("VoiceDeleted: voice_id={}", voice_id);
+                // 从列表中移除
+                app_state.voices.retain(|v| v.id != *voice_id);
+                // 如果删除的是当前选中的音色，切换到其他音色
+                if app_state.selected_voice.as_ref().map(|v| v.id) == Some(*voice_id) {
+                    app_state.selected_voice = app_state.voices.first().cloned();
+                }
             }
         }
     }

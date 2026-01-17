@@ -2,7 +2,6 @@
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-
 use crate::state::{ApiRequest, AppState, AppView, FilePickerRequest, FilePickerType, PauseAudioEvent, PlaybackState, ResumeAudioEvent, StopAudioEvent, TaskState};
 
 // 颜色主题
@@ -168,12 +167,12 @@ fn styled_button(ui: &mut egui::Ui, text: &str, color: egui::Color32) -> egui::R
 }
 
 fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
-    ui.add(
-        egui::Button::new(egui::RichText::new(icon).size(16.0))
-            .fill(egui::Color32::TRANSPARENT)
-            .rounding(6.0),
-    )
-    .on_hover_text(tooltip)
+    let btn = egui::Button::new(egui::RichText::new(icon).size(16.0))
+        .fill(egui::Color32::TRANSPARENT)
+        .min_size(egui::vec2(28.0, 28.0))
+        .sense(egui::Sense::click())
+        .rounding(6.0);
+    ui.add(btn).on_hover_text(tooltip)
 }
 
 fn novel_list_ui(
@@ -265,16 +264,18 @@ fn novel_list_ui(
                     );
                 });
             } else {
+                // 先提取需要的信息，避免在闭包中同时读写 app_state
+                let selected_voice_id = app_state.selected_voice.as_ref().map(|v| v.id);
+                let voices_display: Vec<_> = app_state.voices.iter().map(|v| {
+                    (v.id, v.name.clone(), v.description.clone())
+                }).collect();
+                
+                let mut voice_to_select: Option<uuid::Uuid> = None;
+                let mut voice_to_delete: Option<uuid::Uuid> = None;
+                
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    let mut voice_to_delete: Option<uuid::Uuid> = None;
-                    let mut voice_to_select: Option<crate::api::VoiceResponse> = None;
-
-                    for voice in &app_state.voices {
-                        let is_selected = app_state
-                            .selected_voice
-                            .as_ref()
-                            .map(|v| v.id == voice.id)
-                            .unwrap_or(false);
+                    for (voice_id, voice_name, voice_description) in &voices_display {
+                        let is_selected = selected_voice_id.map(|id| id == *voice_id).unwrap_or(false);
 
                         let card_color = if is_selected {
                             colors::BG_HIGHLIGHT
@@ -282,35 +283,47 @@ fn novel_list_ui(
                             colors::BG_CARD
                         };
 
-                        // 整个卡片可点击
-                        let card_response = egui::Frame::none()
+                        egui::Frame::none()
                             .fill(card_color)
                             .rounding(10.0)
                             .inner_margin(12.0)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    let icon = if is_selected { "🔊" } else { "🎵" };
-                                    ui.label(
-                                        egui::RichText::new(icon).size(16.0).color(if is_selected {
-                                            colors::SUCCESS
-                                        } else {
-                                            colors::TEXT_MUTED
-                                        }),
-                                    );
+                                    // 左侧：选择按钮（图标+名称）
+                                    let select_btn = egui::Button::new(
+                                        egui::RichText::new(if is_selected { "🔊" } else { "🎵" })
+                                            .size(16.0)
+                                            .color(if is_selected { colors::SUCCESS } else { colors::TEXT_MUTED })
+                                    )
+                                    .fill(egui::Color32::TRANSPARENT)
+                                    .frame(false);
+                                    
+                                    if ui.add(select_btn).clicked() {
+                                        voice_to_select = Some(*voice_id);
+                                    }
 
+                                    ui.add_space(8.0);
+
+                                    // 名称和描述
                                     ui.vertical(|ui| {
                                         let name_color = if is_selected {
                                             colors::TEXT_PRIMARY
                                         } else {
                                             colors::TEXT_SECONDARY
                                         };
-                                        ui.label(
-                                            egui::RichText::new(&voice.name)
-                                                .size(14.0)
-                                                .color(name_color),
-                                        );
+                                        
+                                        // 名称也可点击选择
+                                        if ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(voice_name)
+                                                    .size(14.0)
+                                                    .color(name_color)
+                                            ).sense(egui::Sense::click())
+                                        ).clicked() {
+                                            voice_to_select = Some(*voice_id);
+                                        }
 
-                                        if let Some(desc) = &voice.description {
+                                        if let Some(desc) = voice_description {
                                             if !desc.is_empty() {
                                                 ui.label(
                                                     egui::RichText::new(desc)
@@ -321,35 +334,34 @@ fn novel_list_ui(
                                         }
                                     });
 
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::Center),
-                                        |ui| {
-                                            if icon_button(ui, "🗑", "删除").clicked() {
-                                                voice_to_delete = Some(voice.id);
-                                            }
-                                        },
-                                    );
+                                    // 右侧：删除按钮
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        if ui.add(
+                                            egui::Button::new("🗑")
+                                                .fill(colors::BG_CARD)
+                                                .rounding(6.0)
+                                        ).on_hover_text("删除音色").clicked() {
+                                            voice_to_delete = Some(*voice_id);
+                                        }
+                                    });
                                 });
                             });
                         
-                        // 点击卡片选中（排除删除按钮区域的点击）
-                        if card_response.response.interact(egui::Sense::click()).clicked() 
-                            && voice_to_delete.is_none() 
-                        {
-                            voice_to_select = Some(voice.clone());
-                        }
-                        
                         ui.add_space(6.0);
                     }
-
-                    // 在循环外处理选择和删除
-                    if let Some(voice) = voice_to_select {
+                });
+                
+                // 在循环外处理操作
+                if let Some(id) = voice_to_delete {
+                    tracing::info!("Sending DeleteVoice request: {}", id);
+                    api_events.send(ApiRequest::DeleteVoice(id));
+                }
+                
+                if let Some(id) = voice_to_select {
+                    if let Some(voice) = app_state.voices.iter().find(|v| v.id == id).cloned() {
                         app_state.selected_voice = Some(voice);
                     }
-                    if let Some(id) = voice_to_delete {
-                        api_events.send(ApiRequest::DeleteVoice(id));
-                    }
-                });
+                }
             }
         });
 

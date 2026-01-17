@@ -79,10 +79,13 @@ pub struct EmptyData {}
 pub struct NovelResponse {
     pub id: Uuid,
     pub title: String,
+    /// 总段落数（processing 状态时可能为空）
+    #[serde(default)]
     pub total_segments: usize,
     /// 状态: "processing" | "ready" | "error"
     #[serde(default = "default_status")]
     pub status: String,
+    #[serde(default)]
     pub created_at: String,
     /// 是否为临时小说（上传中但未从服务器返回）
     #[serde(default)]
@@ -209,7 +212,7 @@ pub struct QueryTaskStatusResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data")]
 pub enum WsEvent {
-    /// 任务状态变更
+    /// 任务状态变更 (session channel)
     TaskStateChanged {
         session_id: String,
         task_id: String,
@@ -220,10 +223,38 @@ pub enum WsEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// Session 被服务端关闭
+    /// Session 被服务端关闭 (session channel)
     SessionClosed {
         session_id: String,
         reason: String,
+    },
+    /// 小说处理完成 (global events channel)
+    NovelReady {
+        novel_id: Uuid,
+        title: String,
+        total_segments: usize,
+    },
+    /// 小说处理失败 (global events channel)
+    NovelFailed {
+        novel_id: Uuid,
+        error: String,
+    },
+    /// 小说删除中 (global events channel)
+    NovelDeleting {
+        novel_id: Uuid,
+    },
+    /// 小说删除完成 (global events channel)
+    NovelDeleted {
+        novel_id: Uuid,
+    },
+    /// 小说删除失败 (global events channel)
+    NovelDeleteFailed {
+        novel_id: Uuid,
+        error: String,
+    },
+    /// 音色删除完成 (global events channel)
+    VoiceDeleted {
+        voice_id: Uuid,
     },
 }
 

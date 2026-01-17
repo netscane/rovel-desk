@@ -31,7 +31,7 @@ use systems::{
     prefetch_tasks_system, setup_api_channel, startup_load,
 };
 use ui::ui_system;
-use websocket::{handle_ws_requests, poll_ws_responses, setup_ws_client};
+use websocket::{handle_ws_requests, poll_ws_responses, poll_global_ws_responses, setup_ws_client};
 
 fn main() {
     App::new()
@@ -74,7 +74,7 @@ fn main() {
         .add_systems(Startup, startup_load)
         // 配置中文字体
         .add_systems(Startup, configure_fonts)
-        // 更新系统 - 非 UI 相关
+        // 更新系统 - API 和 WebSocket
         .add_systems(
             Update,
             (
@@ -84,7 +84,15 @@ fn main() {
                 // V2: WebSocket 系统
                 handle_ws_requests,
                 poll_ws_responses,
+                poll_global_ws_responses,
                 handle_ws_responses,
+            )
+                .chain(),
+        )
+        // 更新系统 - 音频和定时任务
+        .add_systems(
+            Update,
+            (
                 // 音频系统
                 handle_play_audio,
                 handle_stop_audio,

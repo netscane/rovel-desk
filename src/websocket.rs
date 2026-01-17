@@ -1,8 +1,8 @@
 //! WebSocket client for real-time task status updates - V2 Architecture
 //!
-//! 连接到 /ws/session/{session_id} 接收实时推送:
-//! - TaskStateChanged: 任务状态变更
-//! - SessionClosed: Session 被服务端关闭
+//! 支持两种连接类型:
+//! - /ws/session/{session_id}: 接收任务状态推送 (TaskStateChanged, SessionClosed)
+//! - /ws/events: 全局事件通道 (NovelReady, NovelFailed)
 
 use bevy::prelude::*;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -20,10 +20,24 @@ enum WsCommand {
     Shutdown,
 }
 
-/// WebSocket 客户端资源
+/// 全局事件通道命令
+enum GlobalWsCommand {
+    Connect,
+    Disconnect,
+    Shutdown,
+}
+
+/// WebSocket 客户端资源 (Session channel)
 #[derive(Resource)]
 pub struct WsClient {
     command_tx: Sender<WsCommand>,
+    response_rx: Mutex<Receiver<WsResponse>>,
+}
+
+/// 全局事件 WebSocket 客户端资源
+#[derive(Resource)]
+pub struct GlobalWsClient {
+    command_tx: Sender<GlobalWsCommand>,
     response_rx: Mutex<Receiver<WsResponse>>,
 }
 
@@ -70,7 +84,49 @@ impl Drop for WsClient {
     }
 }
 
-/// WebSocket 线程主循环
+impl GlobalWsClient {
+    pub fn new() -> Self {
+        let (command_tx, command_rx) = mpsc::channel::<GlobalWsCommand>();
+        let (response_tx, response_rx) = mpsc::channel::<WsResponse>();
+
+        // 启动全局事件 WebSocket 线程
+        thread::spawn(move || {
+            global_ws_thread(command_rx, response_tx);
+        });
+
+        Self {
+            command_tx,
+            response_rx: Mutex::new(response_rx),
+        }
+    }
+
+    pub fn connect(&self) {
+        let _ = self.command_tx.send(GlobalWsCommand::Connect);
+    }
+
+    #[allow(dead_code)]
+    pub fn disconnect(&self) {
+        let _ = self.command_tx.send(GlobalWsCommand::Disconnect);
+    }
+
+    pub fn poll_responses(&self) -> Vec<WsResponse> {
+        let mut responses = Vec::new();
+        if let Ok(rx) = self.response_rx.lock() {
+            while let Ok(resp) = rx.try_recv() {
+                responses.push(resp);
+            }
+        }
+        responses
+    }
+}
+
+impl Drop for GlobalWsClient {
+    fn drop(&mut self) {
+        let _ = self.command_tx.send(GlobalWsCommand::Shutdown);
+    }
+}
+
+/// WebSocket 线程主循环 (Session channel)
 fn ws_thread(command_rx: Receiver<WsCommand>, response_tx: Sender<WsResponse>) {
     use tungstenite::{connect, Message};
     use url::Url;
@@ -144,6 +200,12 @@ fn ws_thread(command_rx: Receiver<WsCommand>, response_tx: Sender<WsResponse>) {
                                         reason: reason.clone(),
                                     });
                                 }
+                                // Session channel 不应该收到这些事件
+                                WsEvent::NovelReady { .. } | WsEvent::NovelFailed { .. } 
+                                | WsEvent::NovelDeleting { .. } | WsEvent::NovelDeleted { .. }
+                                | WsEvent::NovelDeleteFailed { .. } | WsEvent::VoiceDeleted { .. } => {
+                                    tracing::warn!("Received global event on session channel: {:?}", event);
+                                }
                             }
                         }
                         Err(e) => {
@@ -176,7 +238,153 @@ fn ws_thread(command_rx: Receiver<WsCommand>, response_tx: Sender<WsResponse>) {
     }
 }
 
-/// 处理 WebSocket 请求
+/// 全局事件 WebSocket 线程主循环
+fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<WsResponse>) {
+    use tungstenite::{connect, Message};
+    use url::Url;
+
+    let mut current_socket: Option<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>> = None;
+    let mut should_reconnect = false;
+    let mut reconnect_delay = Duration::from_secs(1);
+
+    loop {
+        // 检查命令
+        match command_rx.try_recv() {
+            Ok(GlobalWsCommand::Connect) => {
+                should_reconnect = true;
+                reconnect_delay = Duration::from_secs(1);
+            }
+            Ok(GlobalWsCommand::Disconnect) => {
+                should_reconnect = false;
+                if let Some(mut socket) = current_socket.take() {
+                    let _ = socket.close(None);
+                }
+                let _ = response_tx.send(WsResponse::GlobalDisconnected);
+            }
+            Ok(GlobalWsCommand::Shutdown) => {
+                if let Some(mut socket) = current_socket.take() {
+                    let _ = socket.close(None);
+                }
+                break;
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                break;
+            }
+        }
+
+        // 自动连接/重连
+        if should_reconnect && current_socket.is_none() {
+            let url = format!("{}/events", WS_BASE_URL);
+            match Url::parse(&url) {
+                Ok(url) => {
+                    match connect(url.as_str()) {
+                        Ok((socket, _)) => {
+                            // 设置非阻塞模式
+                            if let tungstenite::stream::MaybeTlsStream::Plain(ref stream) = socket.get_ref() {
+                                let _ = stream.set_nonblocking(true);
+                            }
+                            current_socket = Some(socket);
+                            reconnect_delay = Duration::from_secs(1); // 重置重连延迟
+                            let _ = response_tx.send(WsResponse::GlobalConnected);
+                            tracing::info!("Global WebSocket connected to {}", WS_BASE_URL);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to connect global WebSocket: {}, retrying in {:?}", e, reconnect_delay);
+                            thread::sleep(reconnect_delay);
+                            // 指数退避，最大 30 秒
+                            reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(30));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Invalid global WebSocket URL: {}", e);
+                    should_reconnect = false;
+                }
+            }
+        }
+
+        // 读取 WebSocket 消息
+        if let Some(ref mut socket) = current_socket {
+            match socket.read() {
+                Ok(Message::Text(text)) => {
+                    tracing::info!("Global WebSocket received: {}", text);
+                    // 解析 WebSocket 事件
+                    match serde_json::from_str::<WsEvent>(&text) {
+                        Ok(event) => {
+                            tracing::info!("Global WebSocket parsed event: {:?}", event);
+                            match &event {
+                                WsEvent::NovelReady { novel_id, title, total_segments } => {
+                                    let _ = response_tx.send(WsResponse::NovelReady {
+                                        novel_id: *novel_id,
+                                        title: title.clone(),
+                                        total_segments: *total_segments,
+                                    });
+                                }
+                                WsEvent::NovelFailed { novel_id, error } => {
+                                    let _ = response_tx.send(WsResponse::NovelFailed {
+                                        novel_id: *novel_id,
+                                        error: error.clone(),
+                                    });
+                                }
+                                WsEvent::NovelDeleting { novel_id } => {
+                                    let _ = response_tx.send(WsResponse::NovelDeleting {
+                                        novel_id: *novel_id,
+                                    });
+                                }
+                                WsEvent::NovelDeleted { novel_id } => {
+                                    let _ = response_tx.send(WsResponse::NovelDeleted {
+                                        novel_id: *novel_id,
+                                    });
+                                }
+                                WsEvent::NovelDeleteFailed { novel_id, error } => {
+                                    let _ = response_tx.send(WsResponse::NovelDeleteFailed {
+                                        novel_id: *novel_id,
+                                        error: error.clone(),
+                                    });
+                                }
+                                WsEvent::VoiceDeleted { voice_id } => {
+                                    let _ = response_tx.send(WsResponse::VoiceDeleted {
+                                        voice_id: *voice_id,
+                                    });
+                                }
+                                // Global channel 不应该收到这些事件
+                                WsEvent::TaskStateChanged { .. } | WsEvent::SessionClosed { .. } => {
+                                    tracing::warn!("Received session event on global channel: {:?}", event);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse global WebSocket event: {} - {}", e, text);
+                        }
+                    }
+                }
+                Ok(Message::Ping(data)) => {
+                    let _ = socket.send(Message::Pong(data));
+                }
+                Ok(Message::Close(_)) => {
+                    current_socket = None;
+                    let _ = response_tx.send(WsResponse::GlobalDisconnected);
+                    tracing::info!("Global WebSocket disconnected, will reconnect");
+                }
+                Err(tungstenite::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // 非阻塞模式下没有数据，正常情况
+                }
+                Err(e) => {
+                    tracing::warn!("Global WebSocket error: {}", e);
+                    current_socket = None;
+                    // 断开后会自动重连
+                }
+                _ => {}
+            }
+        }
+
+        // 短暂休眠
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// 处理 WebSocket 请求 (Session channel)
 pub fn handle_ws_requests(
     mut events: EventReader<WsRequest>,
     ws_client: Option<Res<WsClient>>,
@@ -197,7 +405,7 @@ pub fn handle_ws_requests(
     }
 }
 
-/// 轮询 WebSocket 响应
+/// 轮询 WebSocket 响应 (Session channel)
 pub fn poll_ws_responses(
     ws_client: Option<Res<WsClient>>,
     mut response_events: EventWriter<WsResponse>,
@@ -209,8 +417,26 @@ pub fn poll_ws_responses(
     }
 }
 
-/// 设置 WebSocket 客户端
+/// 轮询全局 WebSocket 响应
+pub fn poll_global_ws_responses(
+    global_ws_client: Option<Res<GlobalWsClient>>,
+    mut response_events: EventWriter<WsResponse>,
+) {
+    let Some(client) = global_ws_client else { return };
+
+    for response in client.poll_responses() {
+        response_events.send(response);
+    }
+}
+
+/// 设置 WebSocket 客户端 (Session + Global)
 pub fn setup_ws_client(mut commands: Commands) {
+    // Session channel client
     let client = WsClient::new();
     commands.insert_resource(client);
+    
+    // Global events channel client - 启动时自动连接
+    let global_client = GlobalWsClient::new();
+    global_client.connect(); // 自动连接全局事件通道
+    commands.insert_resource(global_client);
 }
