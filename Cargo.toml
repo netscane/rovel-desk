@@ -23,6 +23,9 @@ tungstenite = "0.24"
 url = "2.5"
 tracing = "0.1"
 
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winsock2"] }
+
 [profile.dev]
 opt-level = 1
 

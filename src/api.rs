@@ -271,6 +271,40 @@ struct GetAudioRequest {
 // API Client (using ureq - pure sync, no tokio) - V2
 // ============================================================================
 
+/// Windows: 确保 Winsock 已初始化
+/// 在 Windows 上，某些操作（如 file picker）可能会调用 WSACleanup
+/// 导致后续网络请求失败。此函数确保每次请求前 Winsock 都是可用的。
+#[cfg(target_os = "windows")]
+fn ensure_winsock_initialized() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    
+    // 首次调用时初始化
+    INIT.call_once(|| {
+        unsafe {
+            let mut wsa_data: winapi::um::winsock2::WSADATA = std::mem::zeroed();
+            let _ = winapi::um::winsock2::WSAStartup(
+                0x0202, // Version 2.2
+                &mut wsa_data,
+            );
+        }
+    });
+    
+    // 每次调用都尝试重新初始化（防止被其他代码 cleanup）
+    unsafe {
+        let mut wsa_data: winapi::um::winsock2::WSADATA = std::mem::zeroed();
+        let result = winapi::um::winsock2::WSAStartup(0x0202, &mut wsa_data);
+        if result != 0 {
+            tracing::warn!("WSAStartup returned: {}", result);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_winsock_initialized() {
+    // Non-Windows: no-op
+}
+
 #[derive(Clone, Resource)]
 pub struct ApiClient {
     base_url: String,
@@ -291,6 +325,9 @@ impl ApiClient {
     
     /// 创建新的 ureq agent（纯同步，无 tokio 依赖）
     fn new_agent() -> ureq::Agent {
+        // 确保 Windows Winsock 已初始化
+        ensure_winsock_initialized();
+        
         ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(60))
             .build()

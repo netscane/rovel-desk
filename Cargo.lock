@@ -4717,6 +4717,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "winapi",
 ]
 
 [[package]]
