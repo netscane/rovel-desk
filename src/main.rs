@@ -34,6 +34,14 @@ use ui::ui_system;
 use websocket::{handle_ws_requests, poll_ws_responses, poll_global_ws_responses, setup_ws_client};
 
 fn main() {
+    // On Windows, ensure Winsock is initialized early and stays initialized
+    #[cfg(target_os = "windows")]
+    {
+        // tungstenite/tokio will initialize Winsock, but we do it early to ensure stability
+        // This prevents issues when COM-based dialogs interfere with networking
+        let _ = std::net::TcpStream::connect("0.0.0.0:1").ok(); // Force Winsock init
+    }
+    
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {

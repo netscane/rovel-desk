@@ -42,22 +42,27 @@ pub fn handle_file_picker_requests(
         let sender = channel.sender.clone();
         
         // Use std::thread for Windows COM compatibility
-        std::thread::spawn(move || {
-            let path = match picker_type {
-                FilePickerType::Novel => {
-                    rfd::FileDialog::new()
-                        .add_filter("文本文件", &["txt"])
-                        .pick_file()
-                }
-                FilePickerType::Voice => {
-                    rfd::FileDialog::new()
-                        .add_filter("音频文件", &["wav", "mp3", "flac", "ogg"])
-                        .pick_file()
-                }
-            };
-            
-            let _ = sender.send(FilePickerResult { picker_type, path });
-        });
+        // rfd handles COM initialization internally, but we need to ensure
+        // the dialog runs on a thread that won't interfere with networking
+        std::thread::Builder::new()
+            .name("file_picker".to_string())
+            .spawn(move || {
+                let path = match picker_type {
+                    FilePickerType::Novel => {
+                        rfd::FileDialog::new()
+                            .add_filter("文本文件", &["txt"])
+                            .pick_file()
+                    }
+                    FilePickerType::Voice => {
+                        rfd::FileDialog::new()
+                            .add_filter("音频文件", &["wav", "mp3", "flac", "ogg"])
+                            .pick_file()
+                    }
+                };
+                
+                let _ = sender.send(FilePickerResult { picker_type, path });
+            })
+            .expect("Failed to spawn file picker thread");
     }
 }
 
