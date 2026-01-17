@@ -1,28 +1,48 @@
 //! File Picker System - runs in separate thread to avoid blocking
+//!
+//! Note: On Windows, file dialogs must be run in a thread with COM initialized.
+//! We use std::thread::spawn instead of AsyncComputeTaskPool for better compatibility.
 
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task};
-use futures_lite::future;
+use std::sync::{mpsc, Mutex};
 
 use crate::state::{AppState, FilePickerRequest, FilePickerResult, FilePickerType};
 
-/// File picker task component
-#[derive(Component)]
-pub struct FilePickerTask {
-    task: Task<FilePickerResult>,
+/// Channel receiver for file picker results
+#[derive(Resource)]
+pub struct FilePickerChannel {
+    receiver: Mutex<mpsc::Receiver<FilePickerResult>>,
+    sender: mpsc::Sender<FilePickerResult>,
 }
 
-/// Handle file picker requests - spawn async task
+impl Default for FilePickerChannel {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self { 
+            sender, 
+            receiver: Mutex::new(receiver),
+        }
+    }
+}
+
+/// Setup file picker channel
+pub fn setup_file_picker_channel(mut commands: Commands) {
+    commands.insert_resource(FilePickerChannel::default());
+}
+
+/// Handle file picker requests - spawn native thread (not async task pool)
 pub fn handle_file_picker_requests(
-    mut commands: Commands,
     mut events: EventReader<FilePickerRequest>,
+    channel: Option<Res<FilePickerChannel>>,
 ) {
-    let pool = AsyncComputeTaskPool::get();
+    let Some(channel) = channel else { return };
     
     for event in events.read() {
         let picker_type = event.picker_type;
+        let sender = channel.sender.clone();
         
-        let task = pool.spawn(async move {
+        // Use std::thread for Windows COM compatibility
+        std::thread::spawn(move || {
             let path = match picker_type {
                 FilePickerType::Novel => {
                     rfd::FileDialog::new()
@@ -36,25 +56,24 @@ pub fn handle_file_picker_requests(
                 }
             };
             
-            FilePickerResult { picker_type, path }
+            let _ = sender.send(FilePickerResult { picker_type, path });
         });
-        
-        commands.spawn(FilePickerTask { task });
     }
 }
 
-/// Poll file picker tasks for completion
+/// Poll file picker results from channel
 pub fn poll_file_picker_tasks(
-    mut commands: Commands,
-    mut tasks: Query<(Entity, &mut FilePickerTask)>,
+    channel: Option<Res<FilePickerChannel>>,
     mut result_events: EventWriter<FilePickerResult>,
 ) {
-    for (entity, mut task) in tasks.iter_mut() {
-        if let Some(result) = future::block_on(future::poll_once(&mut task.task)) {
+    let Some(channel) = channel else { return };
+    
+    // Non-blocking receive with mutex
+    if let Ok(receiver) = channel.receiver.lock() {
+        while let Ok(result) = receiver.try_recv() {
             result_events.send(result);
-            commands.entity(entity).despawn();
         }
-    }
+    };
 }
 
 /// Handle file picker results

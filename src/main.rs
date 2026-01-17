@@ -20,7 +20,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPreUpdateSet};
 
 use api::ApiClient;
 use audio::{check_audio_finished, handle_pause_audio, handle_play_audio, handle_resume_audio, handle_stop_audio, AudioPlayer};
-use file_picker::{handle_file_picker_requests, handle_file_picker_results, poll_file_picker_tasks};
+use file_picker::{handle_file_picker_requests, handle_file_picker_results, poll_file_picker_tasks, setup_file_picker_channel};
 use state::{
     ApiRequest, ApiResponse, AppState, AppView, AudioFinishedEvent, FilePickerRequest,
     FilePickerResult, PauseAudioEvent, PlayAudioEvent, ResumeAudioEvent, StopAudioEvent, WsRequest, WsResponse,
@@ -51,6 +51,8 @@ fn main() {
         .insert_resource(ApiClient::default())
         // 音频播放器
         .add_systems(Startup, setup_audio)
+        // 文件选择器通道
+        .add_systems(Startup, setup_file_picker_channel)
         // WebSocket 客户端
         .add_systems(Startup, setup_ws_client)
         // 事件
