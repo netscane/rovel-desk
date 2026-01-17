@@ -17,7 +17,7 @@ rodio = "0.20"
 anyhow = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
 futures-lite = "2.0"
-native-dialog = "0.7"
+rfd = "0.15"
 # V2: WebSocket support
 tungstenite = "0.24"
 url = "2.5"

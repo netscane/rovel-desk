@@ -1,12 +1,13 @@
-//! File Picker System - uses native-dialog for better Windows compatibility
+//! File Picker System - uses rfd async API with global tokio runtime
 //!
-//! native-dialog uses Windows native APIs directly without COM initialization
-//! issues that can interfere with Winsock.
+//! Uses the global tokio runtime from main.rs to ensure Winsock stays
+//! properly initialized on Windows.
 
 use bevy::prelude::*;
 use std::sync::{mpsc, Mutex};
 
 use crate::state::{AppState, FilePickerRequest, FilePickerResult, FilePickerType};
+use crate::get_runtime;
 
 /// Channel receiver for file picker results
 #[derive(Resource)]
@@ -30,7 +31,7 @@ pub fn setup_file_picker_channel(mut commands: Commands) {
     commands.insert_resource(FilePickerChannel::default());
 }
 
-/// Handle file picker requests using native-dialog
+/// Handle file picker requests using rfd's async API with global runtime
 pub fn handle_file_picker_requests(
     mut events: EventReader<FilePickerRequest>,
     channel: Option<Res<FilePickerChannel>>,
@@ -41,38 +42,28 @@ pub fn handle_file_picker_requests(
         let picker_type = event.picker_type;
         let sender = channel.sender.clone();
         
-        // Spawn a thread for the file dialog
-        // native-dialog handles Windows APIs more gracefully
-        std::thread::Builder::new()
-            .name("file_picker".to_string())
-            .spawn(move || {
-                use native_dialog::FileDialog;
-                
-                let result = match picker_type {
-                    FilePickerType::Novel => {
-                        FileDialog::new()
-                            .add_filter("文本文件", &["txt"])
-                            .show_open_single_file()
-                    }
-                    FilePickerType::Voice => {
-                        FileDialog::new()
-                            .add_filter("音频文件", &["wav", "mp3", "flac", "ogg"])
-                            .show_open_single_file()
-                    }
-                };
-                
-                let path = match result {
-                    Ok(Some(p)) => Some(p),
-                    Ok(None) => None,
-                    Err(e) => {
-                        tracing::warn!("File dialog error: {}", e);
-                        None
-                    }
-                };
-                
-                let _ = sender.send(FilePickerResult { picker_type, path });
-            })
-            .expect("Failed to spawn file picker thread");
+        // Spawn task on global runtime - this ensures we use the same
+        // Winsock initialization as the rest of the app
+        get_runtime().spawn(async move {
+            let path = match picker_type {
+                FilePickerType::Novel => {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("文本文件", &["txt"])
+                        .pick_file()
+                        .await
+                        .map(|f| f.path().to_path_buf())
+                }
+                FilePickerType::Voice => {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter("音频文件", &["wav", "mp3", "flac", "ogg"])
+                        .pick_file()
+                        .await
+                        .map(|f| f.path().to_path_buf())
+                }
+            };
+            
+            let _ = sender.send(FilePickerResult { picker_type, path });
+        });
     }
 }
 

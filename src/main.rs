@@ -17,6 +17,7 @@ mod websocket;
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPreUpdateSet};
+use std::sync::OnceLock;
 
 use api::ApiClient;
 use audio::{check_audio_finished, handle_pause_audio, handle_play_audio, handle_resume_audio, handle_stop_audio, AudioPlayer};
@@ -33,13 +34,30 @@ use systems::{
 use ui::ui_system;
 use websocket::{handle_ws_requests, poll_ws_responses, poll_global_ws_responses, setup_ws_client};
 
+/// Global tokio runtime - ensures Winsock is initialized once and stays initialized
+static TOKIO_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// Get or create the global tokio runtime
+pub fn get_runtime() -> &'static tokio::runtime::Runtime {
+    TOKIO_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime")
+    })
+}
+
 fn main() {
-    // On Windows, ensure Winsock is initialized early and stays initialized
+    // Initialize tokio runtime FIRST - this properly initializes Winsock on Windows
+    // The runtime will be kept alive for the entire application lifetime
+    let _rt = get_runtime();
+    
+    // Perform an early network operation to ensure Winsock is fully initialized
+    // This prevents race conditions with other subsystems
     #[cfg(target_os = "windows")]
     {
-        // tungstenite/tokio will initialize Winsock, but we do it early to ensure stability
-        // This prevents issues when COM-based dialogs interfere with networking
-        let _ = std::net::TcpStream::connect("0.0.0.0:1").ok(); // Force Winsock init
+        // Force Winsock initialization with a real network operation
+        let _ = std::net::UdpSocket::bind("127.0.0.1:0");
     }
     
     App::new()
