@@ -1,7 +1,7 @@
-//! File Picker System - runs in separate thread to avoid blocking
+//! File Picker System - uses rfd async API for better Windows compatibility
 //!
-//! Note: On Windows, file dialogs must be run in a thread with COM initialized.
-//! We use std::thread::spawn instead of AsyncComputeTaskPool for better compatibility.
+//! On Windows, rfd's async API properly handles COM initialization in a way
+//! that doesn't interfere with other subsystems like Winsock.
 
 use bevy::prelude::*;
 use std::sync::{mpsc, Mutex};
@@ -30,7 +30,7 @@ pub fn setup_file_picker_channel(mut commands: Commands) {
     commands.insert_resource(FilePickerChannel::default());
 }
 
-/// Handle file picker requests - spawn native thread (not async task pool)
+/// Handle file picker requests using rfd's async API
 pub fn handle_file_picker_requests(
     mut events: EventReader<FilePickerRequest>,
     channel: Option<Res<FilePickerChannel>>,
@@ -41,24 +41,35 @@ pub fn handle_file_picker_requests(
         let picker_type = event.picker_type;
         let sender = channel.sender.clone();
         
-        // Use std::thread for Windows COM compatibility
-        // rfd handles COM initialization internally, but we need to ensure
-        // the dialog runs on a thread that won't interfere with networking
+        // Use rfd's async API with a dedicated tokio runtime
+        // This properly initializes COM on Windows without affecting other subsystems
         std::thread::Builder::new()
             .name("file_picker".to_string())
             .spawn(move || {
-                let path = match picker_type {
-                    FilePickerType::Novel => {
-                        rfd::FileDialog::new()
-                            .add_filter("文本文件", &["txt"])
-                            .pick_file()
+                // Create a single-threaded tokio runtime for async file dialog
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create tokio runtime for file picker");
+                
+                let path = rt.block_on(async {
+                    match picker_type {
+                        FilePickerType::Novel => {
+                            rfd::AsyncFileDialog::new()
+                                .add_filter("文本文件", &["txt"])
+                                .pick_file()
+                                .await
+                                .map(|f| f.path().to_path_buf())
+                        }
+                        FilePickerType::Voice => {
+                            rfd::AsyncFileDialog::new()
+                                .add_filter("音频文件", &["wav", "mp3", "flac", "ogg"])
+                                .pick_file()
+                                .await
+                                .map(|f| f.path().to_path_buf())
+                        }
                     }
-                    FilePickerType::Voice => {
-                        rfd::FileDialog::new()
-                            .add_filter("音频文件", &["wav", "mp3", "flac", "ogg"])
-                            .pick_file()
-                    }
-                };
+                });
                 
                 let _ = sender.send(FilePickerResult { picker_type, path });
             })

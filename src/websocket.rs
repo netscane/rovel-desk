@@ -246,7 +246,7 @@ fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<W
     let mut current_socket: Option<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>> = None;
     let mut should_reconnect = false;
     let mut reconnect_delay = Duration::from_secs(1);
-    let mut shutdown = false;
+    let mut consecutive_failures = 0u32;
 
     loop {
         // 检查命令
@@ -254,6 +254,7 @@ fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<W
             Ok(GlobalWsCommand::Connect) => {
                 should_reconnect = true;
                 reconnect_delay = Duration::from_secs(1);
+                consecutive_failures = 0;
             }
             Ok(GlobalWsCommand::Disconnect) => {
                 should_reconnect = false;
@@ -263,8 +264,6 @@ fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<W
                 let _ = response_tx.send(WsResponse::GlobalDisconnected);
             }
             Ok(GlobalWsCommand::Shutdown) => {
-                shutdown = true;
-                should_reconnect = false;
                 if let Some(mut socket) = current_socket.take() {
                     let _ = socket.close(None);
                 }
@@ -272,9 +271,7 @@ fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<W
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                // 主线程已断开，停止重连并退出
-                shutdown = true;
-                should_reconnect = false;
+                // 主线程已断开，退出
                 if let Some(mut socket) = current_socket.take() {
                     let _ = socket.close(None);
                 }
@@ -282,13 +279,14 @@ fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<W
             }
         }
 
-        // 如果已收到关闭信号，不再尝试重连
-        if shutdown {
-            break;
-        }
-
         // 自动连接/重连
         if should_reconnect && current_socket.is_none() {
+            // 如果连续失败太多次，等待更长时间
+            if consecutive_failures > 10 {
+                thread::sleep(Duration::from_secs(5));
+                consecutive_failures = 5; // 重置一部分，允许继续尝试
+            }
+            
             let url = format!("{}/events", WS_BASE_URL);
             match Url::parse(&url) {
                 Ok(url) => {
@@ -299,16 +297,19 @@ fn global_ws_thread(command_rx: Receiver<GlobalWsCommand>, response_tx: Sender<W
                                 let _ = stream.set_nonblocking(true);
                             }
                             current_socket = Some(socket);
-                            reconnect_delay = Duration::from_secs(1); // 重置重连延迟
+                            reconnect_delay = Duration::from_secs(1);
+                            consecutive_failures = 0;
                             let _ = response_tx.send(WsResponse::GlobalConnected);
                             tracing::info!("Global WebSocket connected to {}", WS_BASE_URL);
                         }
                         Err(e) => {
-                            // 检查是否是致命错误（如 WSAStartup 失败），不再重试
+                            consecutive_failures += 1;
                             let error_str = e.to_string();
+                            
+                            // 对于 Windows Winsock 错误，短暂等待后重试
                             if error_str.contains("10093") || error_str.contains("WSAStartup") {
-                                tracing::warn!("Global WebSocket fatal error: {}, stopping reconnect", e);
-                                should_reconnect = false;
+                                tracing::warn!("Global WebSocket Winsock error, will retry in 2s");
+                                thread::sleep(Duration::from_secs(2));
                             } else {
                                 tracing::warn!("Failed to connect global WebSocket: {}, retrying in {:?}", e, reconnect_delay);
                                 thread::sleep(reconnect_delay);
